@@ -1,0 +1,92 @@
+import re
+import pdfplumber
+from typing import List, Dict
+from .base_parser import BaseParser
+
+class HSBCParser(BaseParser):
+    """Parser for HSBC bank statements"""
+
+    def __init__(self):
+        super().__init__()
+        self.bank_name = "HSBC"
+
+    def detect_bank(self, text: str) -> bool:
+        """Detect if this is an HSBC statement"""
+        return "HSBC" in text.upper() or "THE HONGKONG AND SHANGHAI BANKING" in text.upper()
+
+    def extract_account_info(self, text: str) -> Dict:
+        """Extract account information from HSBC statement"""
+        info = {}
+
+        # Account number pattern
+        account_match = re.search(r'Account\s*(?:Number|No\.?)[\s:]*(\d{3}[-\s]?\d{6}[-\s]?\d{3})', text, re.IGNORECASE)
+        if account_match:
+            info["account_number"] = account_match.group(1).replace(" ", "").replace("-", "")
+
+        # Statement period pattern
+        period_match = re.search(r'(?:Statement\s+Period|Period)[\s:]*(\d{1,2}\s+\w+\s+\d{4})\s*(?:to|-)\s*(\d{1,2}\s+\w+\s+\d{4})', text, re.IGNORECASE)
+        if period_match:
+            info["period_start"] = self.parse_date(period_match.group(1))
+            info["period_end"] = self.parse_date(period_match.group(2))
+
+        return info
+
+    def extract_transactions(self, pdf_path: str) -> List[Dict]:
+        """Extract transactions from HSBC statement"""
+        transactions = []
+
+        with pdfplumber.open(pdf_path) as pdf:
+            for page in pdf.pages:
+                # Try to extract table
+                tables = page.extract_tables()
+
+                for table in tables:
+                    if not table:
+                        continue
+
+                    # Process each row
+                    for row in table:
+                        if not row or len(row) < 3:
+                            continue
+
+                        # Skip header rows
+                        if any(header in str(row).upper() for header in ["DATE", "DESCRIPTION", "TRANSACTION", "BALANCE"]):
+                            continue
+
+                        # HSBC format: Date | Description | Withdrawals | Deposits | Balance
+                        try:
+                            date_str = row[0] if row[0] else ""
+                            description = row[1] if len(row) > 1 and row[1] else ""
+                            withdrawal = row[2] if len(row) > 2 and row[2] else ""
+                            deposit = row[3] if len(row) > 3 and row[3] else ""
+                            balance = row[4] if len(row) > 4 and row[4] else ""
+
+                            # Skip if no date or description
+                            if not date_str or not description:
+                                continue
+
+                            # Parse date
+                            transaction_date = self.parse_date(date_str)
+                            if not transaction_date:
+                                continue
+
+                            # Determine amount (withdrawal is negative)
+                            amount = 0.0
+                            if withdrawal and withdrawal.strip():
+                                amount = -abs(self.clean_amount(withdrawal))
+                            elif deposit and deposit.strip():
+                                amount = abs(self.clean_amount(deposit))
+
+                            # Clean balance
+                            balance_amount = self.clean_amount(balance) if balance else None
+
+                            transactions.append({
+                                "date": transaction_date,
+                                "description": description.strip(),
+                                "amount": amount,
+                                "balance": balance_amount
+                            })
+                        except Exception as e:
+                            continue
+
+        return transactions
